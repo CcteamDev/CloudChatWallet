@@ -4,6 +4,7 @@ pragma solidity ^0.8.7;
 
 import "./Ownable.sol";
 import "./IERC20.sol";
+import "./ReentrancyGuard.sol";
 
 /**
  * CloudChat Official Wallet Contract
@@ -21,7 +22,7 @@ import "./IERC20.sol";
  * If 2/3 of the bosses reject, the transfer will be blocked and rejected
  * The transfer address is in the contract and cannot be changed by the bosses
  */
-contract CloudChatWallet is Ownable {
+contract CloudChatWallet is Ownable, ReentrancyGuard {
     // deposit order struct
     struct Order {
         // deposit order id
@@ -56,6 +57,9 @@ contract CloudChatWallet is Ownable {
     mapping(address => address[]) public bossRejectedData;
 
     // all the events
+    event setBossEvent(address boss, bool online);
+    event setFinanceWalletEvent(address wallet);
+    event setHotWalletEvent(address wallet);
     event DepositSuccess(uint256 id, address indexed from, uint256 value);
     event submitTransferApplySuccess(address indexed token, uint256 amount);
     event cancelTransferApplySuccess(address indexed token);
@@ -92,9 +96,14 @@ contract CloudChatWallet is Ownable {
         uint256 id,
         address token,
         uint256 amount
-    ) public {
+    ) external nonReentrant {
         require(!orders[id].exist, "CCError: The order already exists");
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+        bool success = IERC20(token).transferFrom(
+            msg.sender,
+            address(this),
+            amount
+        );
+        require(success, "CCError: transfer failed");
         orders[id] = Order(
             id,
             msg.sender,
@@ -110,42 +119,49 @@ contract CloudChatWallet is Ownable {
      * Set up the boss list
      * Add or remove
      */
-    function setBoss(address boss, bool online) public onlyOwner {
+    function setBoss(address boss, bool online) external onlyOwner {
+        require(boss != address(0), "CCError: boss can not be zero");
         for (uint256 i = 0; i < bosses.length; i++) {
             if (bosses[i] == boss) {
                 if (online) return;
                 bosses[i] = bosses[bosses.length - 1];
                 bosses.pop();
                 delete bossData[boss];
+                emit setBossEvent(boss, online);
                 return;
             }
         }
         if (online) {
             bossData[boss] = true;
             bosses.push(boss);
+            emit setBossEvent(boss, online);
         }
     }
 
     /**
      * Set up a financial wallet
      */
-    function setFinanceWallet(address wallet) public onlyOwner {
+    function setFinanceWallet(address wallet) external onlyOwner {
+        require(wallet != address(0), "CCError: wallet can not be zero");
         financeWallet = wallet;
+        emit setFinanceWalletEvent(wallet);
     }
 
     /**
      * Set up a hot wallet
      * The contracted funds will be transferred to this address
      */
-    function setHotWallet(address wallet) public onlyOwner {
+    function setHotWallet(address wallet) external onlyOwner {
+        require(wallet != address(0), "CCError: wallet can not be zero");
         hotWallet = wallet;
+        emit setHotWalletEvent(wallet);
     }
 
     /**
      * Financial address to submit transfer request
      */
     function submitTransferApply(address token, uint256 amount)
-        public
+        external
         onlyFinance
     {
         require(
@@ -173,7 +189,7 @@ contract CloudChatWallet is Ownable {
     /**
      * Financial address cancellation transfer request
      */
-    function cancelTransferApply(address token) public onlyFinance {
+    function cancelTransferApply(address token) external onlyFinance {
         require(
             approveData[token] > 0,
             "CCError: There are no cancellable applications at this time"
@@ -219,7 +235,11 @@ contract CloudChatWallet is Ownable {
      * The boss performs the operation of approval
      * Pass or reject this apply
      */
-    function tranferApprove(address token, bool isPass) public onlyBoss {
+    function tranferApprove(address token, bool isPass)
+        external
+        onlyBoss
+        nonReentrant
+    {
         require(approveData[token] > 0, "CCError: Approval cannot be made");
         require(
             !isBossApproved(token),
@@ -235,7 +255,8 @@ contract CloudChatWallet is Ownable {
         uint256 approveResult = getApproveResult(token);
         if (approveResult == 1) {
             uint256 amount = approveData[token];
-            IERC20(token).transfer(hotWallet, amount);
+            bool success = IERC20(token).transfer(hotWallet, amount);
+            require(success, "CCError: transfer failed");
             resetApproveData(token);
             emit TransferSuccess(token, hotWallet, amount);
         } else if (approveResult == 2) {
